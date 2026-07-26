@@ -1,5 +1,13 @@
 from search import load_documents, search_documents
 import sys
+import os
+from event_log import append_event, build_search_event
+from time import perf_counter
+
+log_path = os.environ.get(
+    "SEARCH_LOG_PATH",
+    "logs/search_events.jsonl",
+)
 
 if __name__ == "__main__":
     try:
@@ -26,12 +34,24 @@ if __name__ == "__main__":
         if query == "exit" or query == "quit": 
             print("已退出搜索程序")
             break
+
         if not query:
             print("查询不能为空，请重新输入")
             continue
+        start = perf_counter()
         results = search_documents(query, documents)
+        elapsed_ms = (perf_counter() - start) * 1000
+        event = build_search_event(query, results, elapsed_ms)
+        try:
+            append_event(log_path, event)
+        except OSError as error:
+            print(f"写入搜索日志失败：{error}",
+                  file=sys.stderr,
+                  )
+
         if results != []: 
             print("搜索结果：")
             for filename, score in results:
                 print(f"- {filename}, 分数：{score}")
+
         else: print("没有找到匹配文档")
