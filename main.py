@@ -3,13 +3,15 @@ import sys
 import os
 from event_log import append_event, build_search_event
 from time import perf_counter
+from llm_client import LLMClient, LLMClientError, DeepSeekClient
+from prompt_builder import build_prompt
 
 log_path = os.environ.get(
     "SEARCH_LOG_PATH",
     "logs/search_events.jsonl",
 )
 
-if __name__ == "__main__":
+def run_cli(llmclient: LLMClient) -> None:
     try:
         documents = load_documents("documents")
     except OSError as error:
@@ -24,7 +26,7 @@ if __name__ == "__main__":
         sys.exit(0)
     
     while True:
-        print("请输入查询词：")
+        print("\n请输入查询词：")
         try:
             query = input().strip().lower()
         except(KeyboardInterrupt, EOFError):
@@ -53,5 +55,13 @@ if __name__ == "__main__":
             print("搜索结果：")
             for filename, score in results:
                 print(f"- {filename}, 分数：{score}")
+            prompt = build_prompt(query=query, results=results, documents=documents)
+            if prompt != None:
+                response = llmclient.generate(prompt=prompt)
+                print(response)
 
         else: print("没有找到匹配文档")
+
+if __name__ == "__main__":
+    client:LLMClient = DeepSeekClient()
+    run_cli(client)

@@ -6,11 +6,18 @@ from tempfile import TemporaryDirectory
 import json
 
 
-def run_cli(user_input, log_path):
+def run_cli_process(user_input, log_path):
     env = os.environ.copy()
     env["SEARCH_LOG_PATH"] = str(log_path)
+
+    test_entry = (
+        "from main import run_cli; "
+        "from llm_client import MyClient; "
+        "run_cli(MyClient())"
+    )
+
     return subprocess.run(
-        [sys.executable, "main.py"],
+        [sys.executable, "-c", test_entry],
         input=user_input,
         text=True,
         capture_output=True,
@@ -21,7 +28,7 @@ def run_cli(user_input, log_path):
 def check_cli(name, user_input, expected_texts, expected_queries, expected_results):
     with TemporaryDirectory() as temp_dir:
         log_path = Path(temp_dir) / "logs" / "events.jsonl"
-        result = run_cli(user_input, log_path)
+        result = run_cli_process(user_input, log_path)
 
         assert result.returncode == 0, result.stderr
         assert "Traceback" not in result.stderr, result.stderr
@@ -29,6 +36,13 @@ def check_cli(name, user_input, expected_texts, expected_queries, expected_resul
         for expected_text in expected_texts:
             assert expected_text in result.stdout, result.stdout
 
+        expected_llm_calls = sum(
+        bool(search_results)
+        for search_results in expected_results
+        )
+        actual_llm_calls = result.stdout.splitlines().count("Hello")
+
+        assert actual_llm_calls == expected_llm_calls
 
         if log_path.exists():
             lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -57,7 +71,7 @@ def check_log_failure():
         log_path = Path(temp_dir) / "not_a_file"
         log_path.mkdir()
 
-        result = run_cli(
+        result = run_cli_process(
             "python agent\nexit\n",
             log_path,
         )
