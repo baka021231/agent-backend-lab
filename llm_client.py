@@ -44,6 +44,7 @@ class LLMConfigurationError(LLMClientError):
 
 class DeepSeekClient:
     def __init__(self) -> None:
+        # May cause error
         api_key = os.getenv(DEEPSEEK_API_KEY_ENV)
 
         if not api_key:
@@ -59,6 +60,7 @@ class DeepSeekClient:
 
     def generate(self, prompt:str) -> str:
         try:
+            # May cause error
             response = self._client.chat.completions.create(
             model="deepseek-v4-pro",
             messages=[

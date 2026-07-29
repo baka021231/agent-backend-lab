@@ -57,11 +57,19 @@ def run_cli(llmclient: LLMClient) -> None:
                 print(f"- {filename}, 分数：{score}")
             prompt = build_prompt(query=query, results=results, documents=documents)
             if prompt != None:
-                response = llmclient.generate(prompt=prompt)
-                print(response)
+                try:
+                    response = llmclient.generate(prompt=prompt)
+                    print(response)
+                except LLMClientError as error:
+                    print(f"模型回答错误：{error}")
 
         else: print("没有找到匹配文档")
 
 if __name__ == "__main__":
-    client:LLMClient = DeepSeekClient()
+    try:
+        client:LLMClient = DeepSeekClient()
+    except LLMClientError as error:
+        print(f"程序启动失败：{error}")
+        sys.exit(1)
+
     run_cli(client)

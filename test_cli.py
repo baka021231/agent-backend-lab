@@ -6,14 +6,19 @@ from tempfile import TemporaryDirectory
 import json
 
 
-def run_cli_process(user_input, log_path):
+def run_cli_process(
+    user_input,
+    log_path,
+    client_module="llm_client",
+    client_name="MyClient",
+):
     env = os.environ.copy()
     env["SEARCH_LOG_PATH"] = str(log_path)
 
     test_entry = (
         "from main import run_cli; "
-        "from llm_client import MyClient; "
-        "run_cli(MyClient())"
+        f"from {client_module} import {client_name}; "
+        f"run_cli({client_name}())"
     )
 
     return subprocess.run(
@@ -23,6 +28,50 @@ def run_cli_process(user_input, log_path):
         capture_output=True,
         env = env
     )
+
+def run_main_without_api_key():
+    env = os.environ.copy()
+    env["DEEPSEEK_API_KEY"] = ""
+
+    main_path = Path(__file__).resolve().parent / "main.py"
+
+    return subprocess.run(
+        [sys.executable, str(main_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+def check_startup_missing_api_key():
+    result = run_main_without_api_key()
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stdout, result.stdout
+    assert "Traceback" not in result.stderr, result.stderr
+    expected_text = "程序启动失败：缺少环境变量：DEEPSEEK_API_KEY"
+    assert expected_text in result.stdout
+
+
+def check_model_error(name, client_name, expected_error):
+    with TemporaryDirectory() as temp_dir:
+        log_path = Path(temp_dir) / "logs" / "events.jsonl"
+        result = run_cli_process(
+            user_input="python agent\nexit\n",
+            log_path=log_path,
+            client_module="cli_test_clients",
+            client_name=client_name,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert expected_error in result.stdout, result.stdout
+        assert "已退出搜索程序" in result.stdout, result.stdout
+        assert "Traceback" not in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, result.stderr
+        assert (
+            result.stdout.index(expected_error)
+            < result.stdout.index("已退出搜索程序")
+        ), result.stdout
+
+        print(f"[PASS] {name}")
 
 
 def check_cli(name, user_input, expected_texts, expected_queries, expected_results):
@@ -154,5 +203,21 @@ check_cli(
 )
 
 check_log_failure()
+
+check_startup_missing_api_key()
+
+print("[PASS] startup missing API key")
+
+check_model_error(
+    name="model call failure",
+    client_name="FailingClient",
+    expected_error="模型回答错误：DeepSeek API 调用失败",
+)
+
+check_model_error(
+    name="empty model response",
+    client_name="EmptyResponseClient",
+    expected_error="模型回答错误：DeepSeek 返回了空内容",
+)
 
 print("All CLI tests passed!")
