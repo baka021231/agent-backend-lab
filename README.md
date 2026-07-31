@@ -24,6 +24,13 @@
 - 缺少 API Key 时显示明确的启动失败信息并以状态 1 退出。
 - 模型调用失败或返回空内容时显示本次回答错误，不输出 Traceback，并允许继续查询。
 - 提供最小 FastAPI 应用；`GET /health` 返回状态 200 和 `{"status": "ok"}`，用于确认服务存活，不调用检索或模型。
+- 提供关键词版 `POST /search`；接收 JSON 查询，返回规范化后的 query 和命中文档及分数。
+- `/search` 对正常命中和无匹配返回 200，空查询返回 422，无可搜索文档返回 503，文档读取失败返回 500。
+- 将 Markdown 文档切分为带 `source`、`chunk_index` 和 `chunk_id` 的文本块。
+- 使用本地 Sentence Transformer 生成向量，并写入 LangChain 内存向量库。
+- 根据问题执行 Top-k 语义检索，并把检索到的来源段落交给模型生成回答。
+- 提供 `POST /ask` 的 RAG 接口边界；成功响应同时返回模型回答和完整来源段落。
+- `/ask` 对未配置服务、无相关上下文和模型服务失败分别返回 503、404 和 502。
 
 ## 当前项目结构
 
@@ -34,11 +41,14 @@ agent-backend-lab/
 │   ├── docker.md
 │   └── python.md
 ├── api.py
+├── chunking.py
 ├── cli_test_clients.py
+├── embedding_client.py
 ├── event_log.py
 ├── llm_client.py
 ├── main.py
 ├── prompt_builder.py
+├── rag_service.py
 ├── README.md
 ├── search.py
 ├── test_api.py
@@ -46,18 +56,23 @@ agent-backend-lab/
 ├── test_event_log.py
 ├── test_llm_client.py
 ├── test_prompt_builder.py
-└── test_search.py
+├── test_search.py
+└── vector_retriever.py
 ```
 
 - `main.py`：连续命令行入口，负责检索、计时、事件记录、提示词构造和模型回答。
-- `api.py`：FastAPI 应用入口和独立的 `GET /health` 健康检查。
+- `api.py`：FastAPI 应用入口，提供 `GET /health`、关键词版 `POST /search` 和 RAG 版 `POST /ask`。
+- `chunking.py`：加载 Markdown 文档，并切分为保留来源和段落位次的 `Chunk`。
+- `embedding_client.py`：定义 Embedding 客户端协议、本地模型实现和批量向量化函数。
+- `vector_retriever.py`：构建内存向量库并执行 Top-k 语义检索。
+- `rag_service.py`：编排检索、提示词构造、模型调用和来源返回。
 - `search.py`：文档加载、关键词计数和搜索逻辑。
 - `cli_test_clients.py`：为 CLI 离线失败测试提供可替换的模型客户端。
 - `event_log.py`：构建搜索事件并以 JSONL 格式追加写入。
 - `llm_client.py`：定义 `LLMClient` 协议、离线替身和 DeepSeek 客户端。
 - `prompt_builder.py`：把查询和命中文档构造成模型提示词。
 - `test_search.py`：搜索逻辑测试。
-- `test_api.py`：使用 TestClient 验证 `/health` 的状态码和 JSON 响应。
+- `test_api.py`：使用 TestClient 验证 `/health`，以及 `/search` 的正常、无匹配、空查询、无文档和读取失败契约。
 - `test_event_log.py`：事件构建、JSON 序列化和 JSONL 追加测试。
 - `test_llm_client.py`：缺少 Key、底层调用失败和空响应的离线异常契约检查。
 - `test_prompt_builder.py`：提示词内容、文档过滤和无匹配行为测试。
@@ -71,7 +86,7 @@ agent-backend-lab/
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install openai python-dotenv pytest fastapi uvicorn httpx
+python -m pip install openai python-dotenv pytest fastapi uvicorn httpx langchain-core langchain-text-splitters sentence-transformers
 ```
 
 可以直接设置进程环境变量，也可以在项目根目录创建 `.env` 并填入自己的 Key：
@@ -102,6 +117,22 @@ python -m uvicorn api:app --reload
 ```
 
 启动后可访问 `http://127.0.0.1:8000/health`。该路由只返回服务存活状态，不需要 DeepSeek API Key，也不会调用搜索或模型。
+
+使用关键词搜索：
+
+```bash
+curl -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"docker"}'
+```
+
+正常响应示例：
+
+```json
+{"query":"docker","results":[{"filename":"docker.md","score":1}]}
+```
+
+查询会先去除首尾空白并转为小写。无匹配属于成功搜索，返回状态 200 和空 `results`；空查询、无文档和文档读取失败分别返回 422、503 和 500。`/search` 只调用本地关键词检索，不调用 DeepSeek。
 
 ## 查询日志
 
@@ -148,7 +179,8 @@ python -m pytest test_api.py -v
 - 提示词测试覆盖查询、命中文档过滤和无匹配行为。
 - LLM 客户端测试覆盖缺少 Key、底层调用失败和模型空响应，且不会发起真实请求。
 - CLI 测试共覆盖 9 个场景，包括连续搜索、模型调用次数、无匹配、空输入、标准化退出、EOF、日志写入失败、启动配置失败和两类模型回答失败。
-- FastAPI 测试确实请求 `GET /health`，并断言状态码 200 与固定 JSON 响应。
+- FastAPI 测试确实请求 `GET /health` 和 `POST /search`；共 6 个 pytest 场景，覆盖健康检查、正常搜索与查询归一化、无匹配、空查询 422、无文档 503 和读取失败 500。
+- `/ask` 已使用离线替身验证成功回答与来源返回，以及 422、404、502、503 失败边界；验证不会调用真实模型 API。
 - 断言失败或出现未处理异常时，测试脚本会以非零状态退出。
 - 当前 FastAPI 0.140.13 组合会产生一条 TestClient/httpx 弃用 warning；测试仍通过，退出状态为 0。
 
@@ -157,10 +189,12 @@ python -m pytest test_api.py -v
 - 只读取指定目录第一层的 Markdown 文件，不递归读取。
 - 相关性只基于关键词出现次数。
 - 归一化仅处理小写和有限的首尾标点。
-- 尚未实现中文分词、文档切块、Embedding 或向量检索。
+- 当前向量库只存在于进程内，服务重启后需要重新构建。
+- `/ask` 已有接口与依赖注入边界，但尚未通过 FastAPI lifespan 在服务启动时自动构建向量库和模型客户端；未调用 `configure_rag` 时会返回 503。
+- 当前没有为 `/ask` 提供可直接启动 Uvicorn 的生产配置入口。
 - 尚未实现 API 重试、限流或缓存。
 - JSONL 日志暂未实现轮转、并发写入、重试或备用路径。
-- Web API 当前只有 `GET /health`，尚未提供搜索、模型回答、认证或业务错误响应。
+- Web API 尚未实现认证或更完整的业务能力。
 - 当前没有 Agent、数据库或 Docker。
 
 ## 后续计划概览
