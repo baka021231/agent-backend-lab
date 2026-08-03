@@ -1,0 +1,6 @@
+{"query":"container technology","expected_sources":["docker.md"],"note":"docker.md 明确包含 docker 和 container。","category":"lexical"}
+{"query":"what is the relationship between agent and python?","expected_sources":["python.md"],"note":"python.md 明确描述 python 与 agent 互相需要。","category":"lexical"}
+{"query":"agent","expected_sources":["agent.md","python.md"],"note":"agent.md 和 python.md 都明确包含 agent。","category":"lexical"}
+{"query":"what should I study for containerization?","expected_sources":["docker.md"],"note":"该查询用 study 和 containerization 改写 docker.md 中 learn 和 container 的含义。","category":"semantic"}
+{"query":"which coding language depends mutually on an AI assistant?","expected_sources":["python.md"],"note":"该查询用 coding language、depends mutually 和 AI assistant 改写 python 与 agent 互相需要的关系。","category":"semantic"}
+{"query":"which role is wanted for implementation work?","expected_sources":["agent.md"],"note":"该查询用 role、wanted 和 implementation work 改写 agent.md 中 need、implement 和 intern 的含义。","category":"semantic"}

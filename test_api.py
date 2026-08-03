@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
-from api import app
+from api import app, get_llm_client, get_vector_store
+from rag_service import RAGAnswer
 from unittest.mock import patch
 
 client = TestClient(app)
@@ -41,3 +42,29 @@ def test_search_load_failure():
         response = client.post("/search", json={"query" : "agent"})
     assert response.status_code == 500
     assert response.json() == {"detail": "failed to load documents"}
+
+def test_ask_dependency_overrides():
+    fake_store = object()
+    fake_client = object()
+    expected_answer = RAGAnswer(answer="offline answer", sources=[])
+
+    app.dependency_overrides[get_vector_store] = lambda: fake_store
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    try:
+        with patch("api.answer_question", return_value=expected_answer) as mock_answer_question:
+            response = client.post(
+                "/ask",
+                json={"query": "docker", "k": 2},
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {"answer": "offline answer", "sources": []}
+        mock_answer_question.assert_called_once_with(
+            query="docker",
+            store=fake_store,
+            client=fake_client,
+            k=2,
+        )
+    finally:
+        app.dependency_overrides.pop(get_vector_store, None)
+        app.dependency_overrides.pop(get_llm_client, None)

@@ -31,6 +31,8 @@
 - 根据问题执行 Top-k 语义检索，并把检索到的来源段落交给模型生成回答。
 - 提供 `POST /ask` 的 RAG 接口边界；成功响应同时返回模型回答和完整来源段落。
 - `/ask` 对未配置服务、无相关上下文和模型服务失败分别返回 503、404 和 502。
+- FastAPI lifespan 在服务启动时加载文档、切块、本地 Embedding、内存向量库和 DeepSeek 客户端，并将共享资源写入当前应用状态；初始化失败会阻止服务启动。
+- 提供 6 条小型检索 sanity samples 和可复用 Hit@1 评测函数，可以用同一口径对比关键词与向量检索。
 
 ## 当前项目结构
 
@@ -50,6 +52,8 @@ agent-backend-lab/
 ├── prompt_builder.py
 ├── rag_service.py
 ├── README.md
+├── retrieval_eval.py
+├── retrieval_eval_dataset.jsonl
 ├── search.py
 ├── test_api.py
 ├── test_cli.py
@@ -71,8 +75,10 @@ agent-backend-lab/
 - `event_log.py`：构建搜索事件并以 JSONL 格式追加写入。
 - `llm_client.py`：定义 `LLMClient` 协议、离线替身和 DeepSeek 客户端。
 - `prompt_builder.py`：把查询和命中文档构造成模型提示词。
+- `retrieval_eval.py`：加载评测样本，计算单条与汇总 Hit@1，并为关键词和向量 Retriever 生成同结构报告。
+- `retrieval_eval_dataset.jsonl`：针对当前三篇演示文档的 6 条 lexical/semantic sanity samples。
 - `test_search.py`：搜索逻辑测试。
-- `test_api.py`：使用 TestClient 验证 `/health`，以及 `/search` 的正常、无匹配、空查询、无文档和读取失败契约。
+- `test_api.py`：使用 TestClient 验证 `/health`、`/search` 的正常与失败契约，以及 `/ask` 的 dependency override 离线注入与清理。
 - `test_event_log.py`：事件构建、JSON 序列化和 JSONL 追加测试。
 - `test_llm_client.py`：缺少 Key、底层调用失败和空响应的离线异常契约检查。
 - `test_prompt_builder.py`：提示词内容、文档过滤和无匹配行为测试。
@@ -116,7 +122,7 @@ python agent
 python -m uvicorn api:app --reload
 ```
 
-启动后可访问 `http://127.0.0.1:8000/health`。该路由只返回服务存活状态，不需要 DeepSeek API Key，也不会调用搜索或模型。
+启动时 lifespan 会构建 RAG 共享资源，因此需要可用的本地 Embedding 模型资源和 `DEEPSEEK_API_KEY`；首次使用 Sentence Transformer 时可能需要联网下载模型。启动后可访问 `http://127.0.0.1:8000/health`。`/health` 路由本身只返回服务存活状态，不会在请求期执行检索或调用 DeepSeek。
 
 使用关键词搜索：
 
@@ -133,6 +139,43 @@ curl -X POST http://127.0.0.1:8000/search \
 ```
 
 查询会先去除首尾空白并转为小写。无匹配属于成功搜索，返回状态 200 和空 `results`；空查询、无文档和文档读取失败分别返回 422、503 和 500。`/search` 只调用本地关键词检索，不调用 DeepSeek。
+
+使用向量 RAG 问答：
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"What should I learn for containerization?","k":3}'
+```
+
+成功响应包含 `answer` 和实际交给模型的 `sources`。空查询或非法 `k` 返回 422，无可用上下文返回 404，模型调用失败返回 502。
+
+## 检索评测
+
+`retrieval_eval_dataset.jsonl` 中每行包含 `query`、`expected_sources`、`note` 和 `category`。下面的命令使用同一批样本、固定向量 `k=1` 和同一 Hit@1 定义运行两种基线：
+
+```bash
+python - <<'PY'
+from chunking import load_chunks
+from embedding_client import LocalEmbeddingClient
+from retrieval_eval import (
+    evaluate_keyword_baseline,
+    evaluate_vector_baseline,
+    load_eval_samples,
+)
+from search import load_documents
+from vector_retriever import build_vector_store
+
+samples = load_eval_samples("retrieval_eval_dataset.jsonl")
+documents = load_documents("documents")
+store = build_vector_store(load_chunks("documents"), LocalEmbeddingClient())
+
+print(evaluate_keyword_baseline(samples, documents))
+print(evaluate_vector_baseline(samples, store))
+PY
+```
+
+当前实测关键词 Hit@1 为 3/6=0.5，向量 Hit@1 为 5/6≈0.8333。这只说明向量方法在当前三篇单句文档、6 条人工标注样本、当前 Embedding 模型和 k=1 下得分更高，不证明它在其他语料、查询分布或精确术语匹配场景中仍普遍更好。完整 15—30 条分层评测将在真实代码仓库 Agent 阶段建立。
 
 ## 查询日志
 
@@ -179,8 +222,9 @@ python -m pytest test_api.py -v
 - 提示词测试覆盖查询、命中文档过滤和无匹配行为。
 - LLM 客户端测试覆盖缺少 Key、底层调用失败和模型空响应，且不会发起真实请求。
 - CLI 测试共覆盖 9 个场景，包括连续搜索、模型调用次数、无匹配、空输入、标准化退出、EOF、日志写入失败、启动配置失败和两类模型回答失败。
-- FastAPI 测试确实请求 `GET /health` 和 `POST /search`；共 6 个 pytest 场景，覆盖健康检查、正常搜索与查询归一化、无匹配、空查询 422、无文档 503 和读取失败 500。
-- `/ask` 已使用离线替身验证成功回答与来源返回，以及 422、404、502、503 失败边界；验证不会调用真实模型 API。
+- FastAPI pytest 共 7 个场景：实际请求 `GET /health` 和 `POST /search`，覆盖健康检查、正常搜索与查询归一化、无匹配、空查询 422、无文档 503 和读取失败 500；另使用 `app.dependency_overrides` 为 `/ask` 注入离线 Store 与 LLM Client 替身，验证回答、来源与覆盖清理。
+- `/ask` 的 422、404、502、503 失败边界也已用离线专项验证；所有自动化与专项验证均不调用真实 DeepSeek。
+- 检索评测契约已验证关键词 3/6、向量 5/6、固定 `k=1` 与空样本行为。
 - 断言失败或出现未处理异常时，测试脚本会以非零状态退出。
 - 当前 FastAPI 0.140.13 组合会产生一条 TestClient/httpx 弃用 warning；测试仍通过，退出状态为 0。
 
@@ -190,8 +234,9 @@ python -m pytest test_api.py -v
 - 相关性只基于关键词出现次数。
 - 归一化仅处理小写和有限的首尾标点。
 - 当前向量库只存在于进程内，服务重启后需要重新构建。
-- `/ask` 已有接口与依赖注入边界，但尚未通过 FastAPI lifespan 在服务启动时自动构建向量库和模型客户端；未调用 `configure_rag` 时会返回 503。
-- 当前没有为 `/ask` 提供可直接启动 Uvicorn 的生产配置入口。
+- lifespan 每次服务启动都会同步构建本地 Embedding 与内存向量库；尚未实现持久化索引、延迟初始化或多进程共享。
+- 服务启动失败尚未统一包装为项目领域异常；底层文档、Embedding 或客户端初始化异常会直接阻止 Uvicorn 启动。
+- 当前检索评测只有三篇单句文档和 6 条人工样本，只能作为 sanity benchmark，不支持检索方法的普遍结论。
 - 尚未实现 API 重试、限流或缓存。
 - JSONL 日志暂未实现轮转、并发写入、重试或备用路径。
 - Web API 尚未实现认证或更完整的业务能力。

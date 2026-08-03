@@ -2,15 +2,31 @@ from pydantic import BaseModel
 from search import load_documents, search_documents
 from fastapi import FastAPI, HTTPException, Depends
 from langchain_core.vectorstores import InMemoryVectorStore
-
-from llm_client import LLMClient, LLMClientError
+from contextlib import asynccontextmanager
+from llm_client import LLMClient, LLMClientError, DeepSeekClient
 from rag_service import RAGAnswer, answer_question
+from vector_retriever import build_vector_store
+from chunking import chunk_documents
+from embedding_client import LocalEmbeddingClient
 
 class AskRequest(BaseModel):
     query: str
     k: int = 3
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    documents = load_documents("documents")
+    if not documents:
+        raise RuntimeError("no searchable documents")
+    chunks = chunk_documents(documents)
+    emb_client = LocalEmbeddingClient()
+    store = build_vector_store(chunks=chunks, client=emb_client)
+    client = DeepSeekClient()
+    app.state.vector_store = store
+    app.state.llm_client = client
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 def configure_rag(
     store: InMemoryVectorStore,
